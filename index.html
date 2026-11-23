@@ -3814,5 +3814,123 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 
 </script>
+<script>
+(function enableOfflineKasir_() {
+    const PRODUCT_CACHE_KEY = "koperasi_products_offline_v1";
+    const CART_CACHE_KEY = "koperasi_active_cart_v1";
+
+    function readLocalJson_(key, fallback) {
+        try {
+            const value = JSON.parse(localStorage.getItem(key) || "null");
+            return value === null ? fallback : value;
+        } catch (_) {
+            return fallback;
+        }
+    }
+
+    function persistProductsOffline_() {
+        try {
+            if (Array.isArray(products)) localStorage.setItem(PRODUCT_CACHE_KEY, JSON.stringify(products));
+        } catch (error) {
+            console.warn("Katalog tidak dapat disimpan untuk penggunaan offline:", error);
+        }
+    }
+
+    const originalRenderStockOffline_ = renderStock;
+    renderStock = function() {
+        const result = originalRenderStockOffline_.apply(this, arguments);
+        persistProductsOffline_();
+        return result;
+    };
+
+    const originalRenderCartOffline_ = renderCart;
+    renderCart = function() {
+        const result = originalRenderCartOffline_.apply(this, arguments);
+        try {
+            if (Array.isArray(cart)) localStorage.setItem(CART_CACHE_KEY, JSON.stringify(cart));
+        } catch (error) {
+            console.warn("Keranjang tidak dapat disimpan di perangkat:", error);
+        }
+        return result;
+    };
+
+    const savedCart = readLocalJson_(CART_CACHE_KEY, []);
+    if (Array.isArray(savedCart)) {
+        cart = savedCart;
+        if (cart.length) renderCart();
+    }
+
+    const originalLoadInitialDataOffline_ = loadInitialData;
+    loadInitialData = function() {
+        if (navigator.onLine) return originalLoadInitialDataOffline_.apply(this, arguments);
+
+        const cachedProducts = readLocalJson_(PRODUCT_CACHE_KEY, null);
+        const loader = document.getElementById("loader");
+        if (!Array.isArray(cachedProducts)) {
+            if (loader) loader.classList.add("hidden");
+            showToast("Katalog belum tersimpan di perangkat ini. Buka aplikasi saat online dan tunggu data selesai dimuat.", 12000);
+            return;
+        }
+
+        products = cachedProducts;
+        renderStock();
+        filterSales();
+        filterProfit();
+        if (loader) loader.classList.add("hidden");
+        setTimeout(() => showToast("Mode offline aktif. Barang dari katalog tersimpan bisa ditambahkan ke keranjang; pembayaran perlu koneksi internet.", 12000), 800);
+    };
+
+    if ("serviceWorker" in navigator && location.protocol === "https:") {
+        navigator.serviceWorker.register("./sw.js").catch(error => {
+            console.warn("Cache offline belum dapat diaktifkan:", error);
+        });
+    }
+})();
+</script>
+<script>
+(function useCachedCatalogWhenApiUnavailable_() {
+    const PRODUCT_CACHE_KEY = "koperasi_products_offline_v1";
+
+    loadInitialData = async function() {
+        const loader = document.getElementById("loader");
+        if (loader) loader.classList.remove("hidden");
+
+        if (navigator.onLine) {
+            try {
+                const data = await callServerAsync_("getInitialData");
+                if (!data || !Array.isArray(data.products)) throw new Error("Data katalog tidak valid.");
+                products = data.products;
+                transactions = Array.isArray(data.transactions) ? data.transactions : [];
+                renderStock();
+                filterSales();
+                filterProfit();
+                if (loader) loader.classList.add("hidden");
+                showToast("✅ Database Spreadsheet tersinkron");
+                return;
+            } catch (error) {
+                console.warn("Database tidak terjangkau; memakai katalog perangkat:", error);
+            }
+        }
+
+        let cachedProducts = null;
+        try {
+            cachedProducts = JSON.parse(localStorage.getItem(PRODUCT_CACHE_KEY) || "null");
+        } catch (_) {}
+
+        if (Array.isArray(cachedProducts)) {
+            products = cachedProducts;
+            renderStock();
+            filterSales();
+            filterProfit();
+            if (loader) loader.classList.add("hidden");
+            showToast("Mode offline: katalog tersimpan aktif. Barang bisa dimasukkan ke keranjang; pembayaran perlu koneksi internet.", 12000);
+            return;
+        }
+
+        if (loader) loader.classList.add("hidden");
+        showToast("Katalog belum tersedia di perangkat ini. Buka aplikasi dan muat katalog sekali saat internet tersedia.", 12000);
+    };
+})();
+</script>
 </body>
 </html>

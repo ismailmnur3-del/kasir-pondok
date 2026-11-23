@@ -637,6 +637,10 @@ thead th { background: #1e4c39; }
             </button>
             
             <button onclick="printCartDraft()" class="bg-white border-2 border-slate-200 p-3 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition uppercase text-sm">Draft Struk</button>
+            <div id="payment-sync-status" class="hidden rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900" role="status" aria-live="polite">
+                <p id="payment-sync-message" class="font-semibold"></p>
+                <button id="payment-sync-retry" type="button" onclick="retryPendingTransaction()" class="hidden mt-2 rounded-lg bg-amber-700 px-4 py-2 text-xs font-bold text-white hover:bg-amber-800">CEK STATUS &amp; COBA SINKRONKAN LAGI</button>
+            </div>
         </div>
 
         <div class="card pro-cart-summary p-4 space-y-3">
@@ -1147,8 +1151,8 @@ thead th { background: #1e4c39; }
                 </div>
 
                 <div class="pt-4 border-t">
-                    <button onclick="deleteTrx()" class="w-full bg-red-600 text-white py-3 rounded-xl font-bold hover:bg-red-700">HAPUS TRANSAKSI (BATAL)</button>
-                    <p class="text-[10px] text-red-500 mt-2 text-center">* Menghapus transaksi akan mengembalikan stok barang.</p>
+                    <button id="btn-cancel-transaction" onclick="deleteTrx()" class="w-full bg-red-600 text-white py-3 rounded-xl font-bold hover:bg-red-700">BATALKAN TRANSAKSI &amp; KEMBALIKAN STOK</button>
+                    <p class="text-[10px] text-red-500 mt-2 text-center">* Riwayat tetap tersimpan. Alasan pembatalan dicatat untuk audit.</p>
                 </div>
             </div>
         </div>
@@ -1278,7 +1282,7 @@ thead th { background: #1e4c39; }
     <script>
         const KOPERASI_API_URL = "https://script.google.com/macros/s/AKfycby0mnhP9DkkvSnHOJg1HcHNOlgEExlYKR7-HT2y5umeyI12suiTKQMRH6P-6XB65_Ar/exec";
 
-        function callKoperasiJsonp_(action, args = []) {
+        function callKoperasiJsonp_(action, args = [], timeoutMs = 9000) {
             return new Promise((resolve, reject) => {
                 const callbackName = "__koperasi_jsonp_" + Date.now() + "_" + Math.floor(Math.random() * 1000000000);
                 const script = document.createElement("script");
@@ -1290,111 +1294,98 @@ thead th { background: #1e4c39; }
                 const timer = setTimeout(() => {
                     cleanup();
                     reject(new Error("Waktu tunggu pembacaan database habis."));
-                }, 15000);
-
+                }, timeoutMs);
                 window[callbackName] = response => {
                     cleanup();
-                    if (!response || !response.success) {
-                        reject(new Error(response && response.error ? response.error : "Pembacaan database gagal."));
-                    } else {
-                        resolve(response.data);
-                    }
+                    if (!response || !response.success) reject(new Error(response && response.error ? response.error : "Pembacaan database gagal."));
+                    else resolve(response.data);
                 };
-
                 let url = KOPERASI_API_URL + "?action=" + encodeURIComponent(action) + "&callback=" + encodeURIComponent(callbackName);
                 if (action === "getDailyKasRecord") url += "&date=" + encodeURIComponent(args[0] || "");
-                script.onerror = () => {
-                    cleanup();
-                    reject(new Error("Gagal membaca database Apps Script."));
-                };
+                if (action === "getTransactionById") url += "&id=" + encodeURIComponent(args[0] || "");
+                if (action === "getProductByBarcode") url += "&barcode=" + encodeURIComponent(args[0] || "");
+                script.onerror = () => { cleanup(); reject(new Error("Gagal membaca database Apps Script.")); };
                 script.src = url;
                 document.head.appendChild(script);
             });
         }
 
-        function delayKoperasiApi_(ms) {
+        
+
+function delayKoperasiApi_(ms) {
             return new Promise(resolve => setTimeout(resolve, ms));
         }
 
         async function callKoperasiApi_(method, args = []) {
-            const readActions = ["getInitialData", "getBroadcastMessage", "getDailyKasRecord"];
+            const readActions = ["getInitialData", "getBroadcastMessage", "getDailyKasRecord", "getTransactionById", "getProductByBarcode"];
             if (readActions.includes(method)) return callKoperasiJsonp_(method, args);
-
-            const writeActions = [
-                "saveProductToSheet", "deleteProductFromSheet", "recordTransaction",
-                "updateTransactionMethodInSheet", "deleteTransactionFromSheet",
-                "insertDailyOmzetToKas", "saveBroadcastMessage"
-            ];
+            const writeActions = ["saveProductToSheet", "deleteProductFromSheet", "recordTransaction", "updateTransactionMethodInSheet", "deleteTransactionFromSheet", "insertDailyOmzetToKas", "saveBroadcastMessage"];
             if (!writeActions.includes(method)) throw new Error("Aksi API tidak diizinkan.");
 
-            let targetBarcode = "";
-            if (method === "deleteProductFromSheet") {
-                const before = await callKoperasiJsonp_("getInitialData");
-                const target = (before.products || []).find(item => String(item.id) === String(args[0]));
-                if (!target) throw new Error("Barang tidak ditemukan sebelum dihapus.");
-                targetBarcode = String(target.barcode || "");
-            }
-
             const beforeKasRecord = method === "insertDailyOmzetToKas"
-                ? await callKoperasiJsonp_("getDailyKasRecord", [args[0]])
-                : null;
+                ? await callKoperasiJsonp_("getDailyKasRecord", [args[0]]) : null;
+            const transId = method === "recordTransaction" ? String((args[0] || {}).id || "") : String(args[0] || "");
+            const targetBarcode = method === "saveProductToSheet" ? String((args[0] || {}).barcode || "").trim()
+                : method === "deleteProductFromSheet" ? String(args[1] || "").trim() : "";
 
-            // Apps Script ContentService blocks readable CORS responses. Send a simple
-            // POST, then confirm the change using the read-only JSONP routes above.
-            await fetch(KOPERASI_API_URL, {
-                mode: "no-cors",
-                method: "POST",
+            // POST dikirim satu kali. Responsnya opaque di GitHub Pages; pembacaan JSONP
+            // yang spesifik mengonfirmasi hasilnya tanpa mengunduh seluruh riwayat transaksi.
+            fetch(KOPERASI_API_URL, {
+                mode: "no-cors", method: "POST",
                 headers: { "Content-Type": "text/plain;charset=utf-8" },
                 body: JSON.stringify({ action: method, args })
-            });
+            }).catch(() => {});
 
-            for (let attempt = 0; attempt < 8; attempt++) {
-                await delayKoperasiApi_(250 + attempt * 250);
-
-                if (method === "insertDailyOmzetToKas") {
-                    const record = await callKoperasiJsonp_("getDailyKasRecord", [args[0]]);
-                    if (record) {
-                        return {
-                            alreadyRecorded: Boolean(beforeKasRecord),
-                            amount: Number(record.amount) || 0,
-                            saldo: Number(record.saldo) || 0,
-                            date: record.date
-                        };
+            const deadline = Date.now() + 24000;
+            let attempt = 0;
+            let lastError = null;
+            while (Date.now() < deadline) {
+                await delayKoperasiApi_(attempt === 0 ? 450 : 800);
+                attempt++;
+                try {
+                    if (method === "recordTransaction") {
+                        const saved = await callKoperasiJsonp_("getTransactionById", [transId], 5000);
+                        if (saved && String(saved.id) === transId) {
+                            const status = String(saved.status || "").toUpperCase();
+                            if (status === "MENYIMPAN") continue;
+                            if (status === "DIBATALKAN") throw new Error("Transaksi dengan ID ini sudah dibatalkan. Muat ulang data sebelum membuat transaksi baru.");
+                            return saved;
+                        }
+                    } else if (method === "saveProductToSheet") {
+                        const saved = await callKoperasiJsonp_("getProductByBarcode", [targetBarcode], 5000);
+                        const requested = args[0] || {};
+                        if (saved && saved.nama === String(requested.nama || "").trim()) return saved;
+                    } else if (method === "deleteProductFromSheet") {
+                        const saved = await callKoperasiJsonp_("getProductByBarcode", [targetBarcode], 5000);
+                        if (targetBarcode && !saved) return true;
+                    } else if (method === "updateTransactionMethodInSheet") {
+                        const saved = await callKoperasiJsonp_("getTransactionById", [transId], 5000);
+                        if (saved && String(saved.method).toUpperCase() === String(args[1] || "").toUpperCase()) return true;
+                    } else if (method === "deleteTransactionFromSheet") {
+                        const saved = await callKoperasiJsonp_("getTransactionById", [transId], 5000);
+                        if (saved && String(saved.status || "").toUpperCase() === "DIBATALKAN") return saved;
+                    } else if (method === "insertDailyOmzetToKas") {
+                        const record = await callKoperasiJsonp_("getDailyKasRecord", [args[0]], 5000);
+                        if (record) return { alreadyRecorded: Boolean(beforeKasRecord), amount: Number(record.amount) || 0, saldo: Number(record.saldo) || 0, date: record.date };
+                    } else if (method === "saveBroadcastMessage") {
+                        const savedMessage = await callKoperasiJsonp_("getBroadcastMessage", [], 5000);
+                        if (String(savedMessage || "") === String(args[0] || "")) return "Pesan diperbarui!";
                     }
-                    continue;
-                }
-
-                if (method === "saveBroadcastMessage") {
-                    const savedMessage = await callKoperasiJsonp_("getBroadcastMessage");
-                    if (String(savedMessage || "") === String(args[0] || "")) return "Pesan diperbarui!";
-                    continue;
-                }
-
-                const state = await callKoperasiJsonp_("getInitialData");
-                const productsState = Array.isArray(state.products) ? state.products : [];
-                const transactionsState = Array.isArray(state.transactions) ? state.transactions : [];
-
-                if (method === "saveProductToSheet") {
-                    const product = args[0] || {};
-                    const saved = productsState.find(item => String(item.barcode).trim() === String(product.barcode || "").trim());
-                    if (saved && saved.nama === String(product.nama || "").trim()) return "Barang tersimpan.";
-                } else if (method === "deleteProductFromSheet") {
-                    if (!productsState.some(item => String(item.barcode || "") === targetBarcode)) return true;
-                } else if (method === "recordTransaction") {
-                    const trans = args[0] || {};
-                    if (transactionsState.some(item => String(item.id) === String(trans.id || ""))) return "Transaction Recorded";
-                } else if (method === "updateTransactionMethodInSheet") {
-                    const saved = transactionsState.find(item => String(item.id) === String(args[0] || ""));
-                    if (saved && String(saved.method).toUpperCase() === String(args[1] || "").toUpperCase()) return true;
-                } else if (method === "deleteTransactionFromSheet") {
-                    if (!transactionsState.some(item => String(item.id) === String(args[0] || ""))) return true;
+                } catch (error) {
+                    lastError = error;
+                    if (error && /sudah dibatalkan/.test(error.message || "")) throw error;
                 }
             }
-
-            throw new Error("Permintaan dikirim, tetapi hasilnya belum terverifikasi di spreadsheet.");
+            const message = method === "recordTransaction"
+                ? "Status transaksi belum terkonfirmasi. Keranjang tersimpan di perangkat ini; jangan membuat transaksi baru. Klik Cek Status untuk mencoba sinkronisasi dengan ID yang sama."
+                : "Permintaan sudah dikirim, tetapi hasilnya belum terverifikasi. Coba periksa kembali koneksi dan status database.";
+            if (lastError && !navigator.onLine) throw new Error(message + " Koneksi internet sedang terputus.");
+            throw new Error(message);
         }
 
-        function createAppsScriptRun_(successHandler, failureHandler) {
+        
+
+function createAppsScriptRun_(successHandler, failureHandler) {
             const bridge = function() {};
             return new Proxy(bridge, {
                 get: function(_target, property) {
@@ -1431,32 +1422,63 @@ thead th { background: #1e4c39; }
         let cart = [];
         let editingProductId = null;
         let activeTrxId = null;
+        let pendingRecovery = null;
+        let pendingRecoveryWasRestored = false;
+        let paymentSaveInProgress = false;
+        let paymentStatusTimer = null;
+        const INFLIGHT_TRANSACTION_KEY = "koperasi_inflight_transaction";
 // Tambahkan baris ini
 let pendingTransactions = JSON.parse(localStorage.getItem('koperasi_pending')) || [];
 
 window.onload = () => {
     loadInitialData();
     initReports();
-    renderPendingTransactions(); 
-    updateNetworkStatus(); // <-- Tambahkan baris ini
-    renderJadwalEditor(); // Memastikan kolom pengaturan dibuat
-    updateActiveStaff();  // Memperbarui nama petugas di kasir
+    renderPendingTransactions();
+    updateNetworkStatus();
+    renderJadwalEditor();
+    updateActiveStaff();
     setInterval(updateActiveStaff, 60000);
 
-    const savedCart = localStorage.getItem('koperasi_cart_backup');
-    if (savedCart) {
+    let restoredInflight = false;
+    const storedPayment = localStorage.getItem(INFLIGHT_TRANSACTION_KEY);
+    if (storedPayment) {
         try {
-            const parsedCart = JSON.parse(savedCart);
-            if (parsedCart.length > 0) {
-                cart = parsedCart;
-                renderCart(); // Tampilkan kembali ke tabel
-                showToast("🛒 Keranjang sebelumnya dipulihkan");
+            const parsedPayment = JSON.parse(storedPayment);
+            if (parsedPayment && parsedPayment.id && Array.isArray(parsedPayment.items) && parsedPayment.items.length) {
+                pendingRecovery = parsedPayment;
+                pendingRecoveryWasRestored = true;
+                cart = JSON.parse(JSON.stringify(parsedPayment.items));
+                renderCart();
+                setCheckoutLocked(true);
+                setPaymentSyncStatus("Memeriksa transaksi " + parsedPayment.id + " yang sempat tertunda. Jangan buat transaksi baru untuk keranjang ini.", "pending", false);
+                document.getElementById('loader').classList.add('hidden');
+                setTimeout(() => retryPendingTransaction({ recovered: true, printReceipt: false }), 250);
+                restoredInflight = true;
             }
         } catch (e) {
-            console.error("Gagal memuat backup keranjang", e);
+            console.error("Data sinkronisasi transaksi rusak:", e);
+            localStorage.removeItem(INFLIGHT_TRANSACTION_KEY);
+        }
+    }
+
+    if (!restoredInflight) {
+        const savedCart = localStorage.getItem('koperasi_cart_backup');
+        if (savedCart) {
+            try {
+                const parsedCart = JSON.parse(savedCart);
+                if (Array.isArray(parsedCart) && parsedCart.length > 0) {
+                    cart = parsedCart;
+                    renderCart();
+                    showToast("🛒 Keranjang sebelumnya dipulihkan");
+                }
+            } catch (e) {
+                console.error("Gagal memuat backup keranjang", e);
+            }
         }
     }
 };
+
+
 
 document.addEventListener('keydown', function(e) {
     // Memastikan F8 membuka modal pembayaran HANYA JIKA ONLINE
@@ -1670,8 +1692,18 @@ document.addEventListener('keydown', function(e) {
             }
         }
 
+        function getUniqueProductByBarcode_(barcode, notify = true) {
+            const code = String(barcode || "").trim();
+            const matches = products.filter(item => String(item.barcode || "").trim() === code);
+            if (matches.length > 1) {
+                if (notify) showToast("Barcode " + code + " tercatat ganda. Perbaiki data stok sebelum menjual barang ini.", 7000);
+                return null;
+            }
+            return matches[0] || null;
+        }
+
         function addToCartByBarcode(barcode) {
-            const p = products.find(i => i.barcode === barcode);
+            const p = getUniqueProductByBarcode_(barcode);
             if (p) {
                 addToCart(p);
                 document.getElementById('scan-input').value = '';
@@ -1680,43 +1712,39 @@ document.addEventListener('keydown', function(e) {
         }
 
         function addToCartManual() {
-            const val = document.getElementById('scan-input').value;
-            const p = products.find(i => i.barcode === val || i.nama.toLowerCase() === val.toLowerCase());
+            if (pendingRecovery) return showToast("Selesaikan sinkronisasi transaksi tertunda terlebih dahulu.", 7000);
+            const val = document.getElementById('scan-input').value.trim();
+            const exactBarcode = products.filter(i => String(i.barcode || '').trim() === val);
+            if (exactBarcode.length > 1) return showToast("Barcode tercatat lebih dari sekali. Perbaiki data barang dahulu.", 7000);
+            const p = exactBarcode[0] || products.find(i => String(i.nama || '').toLowerCase() === val.toLowerCase());
             if (p) addToCart(p);
             else showToast("Barang tidak ditemukan");
         }
 
         function addToCart(product) {
+            if (pendingRecovery) return showToast("Selesaikan sinkronisasi transaksi tertunda terlebih dahulu.", 7000);
             const qtyInput = parseInt(document.getElementById('qty-input').value) || 1;
-
-            if (qtyInput <= 0) {
-                showToast("⚠️ Qty harus lebih dari 0");
-                return;
+            if (qtyInput <= 0) return showToast("⚠️ Qty harus lebih dari 0");
+            const uniqueProduct = getUniqueProductByBarcode_(product.barcode);
+            if (!uniqueProduct) return;
+            if (!Number.isFinite(Number(uniqueProduct.jual)) || Number(uniqueProduct.jual) <= 0) {
+                return showToast("Harga jual barang tidak valid. Perbaiki data sebelum ditambahkan.", 7000);
             }
-
-            const existing = cart.find(c => c.barcode === product.barcode);
-
-            if (existing) {
-                existing.qty += qtyInput;
-            } else {
-                cart.push({ ...product, qty: qtyInput });
-            }
-
+            const existing = cart.find(c => String(c.barcode) === String(uniqueProduct.barcode));
+            if (existing) existing.qty += qtyInput;
+            else cart.push({ ...uniqueProduct, qty: qtyInput });
             document.getElementById('qty-input').value = 1;
             renderCart();
-
-            // STOK 0 / MINUS TETAP BOLEH DIJUAL.
-            if (Number(product.stok) <= 0) {
-                showToast(
-                    "⚠️ Stok " + product.stok +
-                    ". Tetap ditambahkan ke transaksi."
-                );
+            if (Number(uniqueProduct.stok) <= 0 || Number(uniqueProduct.stok) < qtyInput) {
+                showToast("⚠️ Stok tidak mencukupi (tersedia " + uniqueProduct.stok + "). Peringatan akan muncul lagi sebelum pembayaran.", 7000);
             } else {
                 showToast("Item ditambahkan");
             }
         }
 
-        function renderCart() {
+        
+
+function renderCart() {
     const body = document.getElementById('cart-items');
     body.innerHTML = cart.map((c, i) => {
         const subtotalRaw = c.jual * c.qty;
@@ -1751,17 +1779,28 @@ document.addEventListener('keydown', function(e) {
 }
 
         function updateCartQty(idx, delta) {
+            if (pendingRecovery) return showToast("Keranjang sedang menunggu konfirmasi database.", 6000);
+            if (!cart[idx]) return;
             cart[idx].qty += delta;
-            if (cart[idx].qty <= 0) cart.splice(idx, 1);
+            if (cart[idx].qty <= 0) {
+                if (!confirm("Hapus " + cart[idx].nama + " dari keranjang?")) { cart[idx].qty = 1; return; }
+                cart.splice(idx, 1);
+            }
             renderCart();
         }
 
         function removeFromCart(idx) {
+            if (pendingRecovery) return showToast("Keranjang sedang menunggu konfirmasi database.", 6000);
+            const item = cart[idx];
+            if (!item) return;
+            if (!confirm("Hapus " + item.nama + " dari keranjang?")) return;
             cart.splice(idx, 1);
             renderCart();
         }
 
-        function calculateTotals() {
+        
+
+function calculateTotals() {
     // Menghitung total berdasarkan subtotal yang sudah dibulatkan
     const totalWithRounding = cart.reduce((acc, curr) => {
         const subtotalRaw = curr.jual * curr.qty;
@@ -1775,6 +1814,7 @@ document.addEventListener('keydown', function(e) {
 }
 
         function clearCart() {
+    if (pendingRecovery) return showToast("Selesaikan sinkronisasi transaksi tertunda terlebih dahulu.", 7000);
     if (confirm("Kosongkan keranjang belanja?")) {
         cart = [];
         // --- TAMBAHKAN BARIS INI ---
@@ -1904,35 +1944,45 @@ function handlePayEnter(e) {
                         loadInitialData();
                         showToast("Barang dihapus");
                     })
-                    .deleteProductFromSheet(id);
+                    .deleteProductFromSheet(id, p.barcode);
             }
         }
 
         function saveProduct() {
             const data = {
                 id: editingProductId,
-                nama: document.getElementById('p-nama').value,
-                barcode: document.getElementById('p-barcode').value,
-                modal: parseInt(document.getElementById('p-modal').value) || 0,
-                jual: parseInt(document.getElementById('p-jual').value) || 0,
-                stok: parseInt(document.getElementById('p-stok').value) || 0,
-                min: parseInt(document.getElementById('p-min').value) || 0,
+                nama: document.getElementById('p-nama').value.trim(),
+                barcode: document.getElementById('p-barcode').value.trim(),
+                modal: Number(document.getElementById('p-modal').value) || 0,
+                jual: Number(document.getElementById('p-jual').value) || 0,
+                stok: Number(document.getElementById('p-stok').value) || 0,
+                min: Number(document.getElementById('p-min').value) || 0,
                 satuan: document.getElementById('p-satuan').value
             };
-
             if (!data.nama || !data.barcode) return alert("Mohon isi Nama & Barcode!");
+            if (data.modal < 0 || data.jual <= 0) return alert("Harga modal harus nol atau lebih dan harga jual harus lebih dari nol.");
+            const duplicate = products.find(item => String(item.barcode || "").trim() === data.barcode && String(item.id) !== String(data.id));
+            if (duplicate) return alert("Barcode " + data.barcode + " sudah digunakan oleh " + duplicate.nama + ". Gunakan barcode yang berbeda.");
+            if (data.modal > 0 && data.jual < data.modal && !confirm("Harga jual lebih rendah dari harga modal. Tetap simpan?")) return;
+            if (data.modal > 0 && data.jual > data.modal * 10 && !confirm("Harga jual lebih dari 10 kali harga modal. Periksa kemungkinan salah input. Tetap simpan?")) return;
 
             document.getElementById('loader').classList.remove('hidden');
             google.script.run
                 .withSuccessHandler(() => {
-                    loadInitialData();
                     document.getElementById('product-modal').classList.add('hidden');
-                    showToast("Database Diperbarui");
+                    showToast("Database diperbarui");
+                    loadInitialData();
+                })
+                .withFailureHandler(err => {
+                    document.getElementById('loader').classList.add('hidden');
+                    alert("Barang tidak tersimpan: " + (err && err.message ? err.message : err));
                 })
                 .saveProductToSheet(data);
         }
 
-        function closeProductModal() {
+        
+
+function closeProductModal() {
             document.getElementById('product-modal').classList.add('hidden');
         }
 
@@ -2017,7 +2067,10 @@ function handlePayEnter(e) {
             }
 
             body.innerHTML = filtered.map(t => {
-                totalSales += Number(t.total) || 0;
+                const rowStatus = String(t.status || "").toUpperCase();
+                const isVoided = rowStatus === "DIBATALKAN";
+                const isPending = rowStatus === "MENYIMPAN";
+                if (!isVoided && !isPending) totalSales += Number(t.total) || 0;
 
                 const itemCount = Array.isArray(t.items)
                     ? t.items.reduce((sum, item) => sum + (Number(item.qty) || 0), 0)
@@ -2042,7 +2095,7 @@ function handlePayEnter(e) {
 
                         <td class="p-2 text-center">
                             <span class="bg-blue-100 text-blue-800 px-2 py-0.5 rounded text-[10px] uppercase font-bold">
-                                ${escapeHtml(t.method || '-')}
+                                ${isVoided ? 'DIBATALKAN' : (isPending ? 'MENYIMPAN' : escapeHtml(t.method || '-'))}
                             </span>
                         </td>
 
@@ -2222,6 +2275,10 @@ function handlePayEnter(e) {
                 </div>
             `;
 
+            if (String(t.status || "").toUpperCase() === "DIBATALKAN") {
+                info.insertAdjacentHTML("beforeend", "<div class=\"mt-2 rounded-lg bg-red-50 p-3 text-sm text-red-800\"><b>Status:</b> DIBATALKAN<br><b>Alasan:</b> " + escapeHtml(t.cancellationReason || "Tidak dicatat") + "</div>");
+            }
+
             if (items.length === 0) {
                 body.innerHTML = `
                     <tr>
@@ -2277,7 +2334,7 @@ function handlePayEnter(e) {
         function filterProfit() {
             const date = document.getElementById('report-date-profit').value;
             const searchQuery = document.getElementById('search-profit-item').value.toLowerCase();
-            const filtered = transactions.filter(t => t.date.startsWith(date));
+            const filtered = transactions.filter(t => String(t.date || "").startsWith(date) && !["DIBATALKAN", "MENYIMPAN"].includes(String(t.status || "").toUpperCase()));
             const profitMap = {};
 
             filtered.forEach(t => {
@@ -2330,6 +2387,15 @@ function handlePayEnter(e) {
                 <div class="flex justify-between mb-1"><b>Waktu:</b> <span>${new Date(t.date).toLocaleString()}</span></div>
                 <div class="flex justify-between"><b>Total:</b> <span class="text-blue-600 font-bold">Rp ${t.total.toLocaleString()}</span></div>
             `;
+            const cancelButton = document.getElementById("btn-cancel-transaction");
+            const isVoided = String(t.status || "").toUpperCase() === "DIBATALKAN";
+            if (cancelButton) {
+                cancelButton.disabled = isVoided;
+                cancelButton.textContent = isVoided ? "TRANSAKSI SUDAH DIBATALKAN" : "BATALKAN TRANSAKSI & KEMBALIKAN STOK";
+            }
+            if (isVoided) {
+                document.getElementById("edit-trx-info").insertAdjacentHTML("beforeend", "<div class=\"mt-2 rounded-lg bg-red-50 p-3 text-sm text-red-800\"><b>Status:</b> DIBATALKAN<br><b>Alasan:</b> " + escapeHtml(t.cancellationReason || "Tidak dicatat") + "</div>");
+            }
             document.getElementById('edit-trx-modal').classList.remove('hidden');
         }
 
@@ -2353,20 +2419,48 @@ function handlePayEnter(e) {
         }
 
         function deleteTrx() {
-            if(!confirm("Anda yakin ingin menghapus transaksi ini? Stok barang akan dikembalikan otomatis.")) return;
-            
+            const transaction = transactions.find(item => String(item.id) === String(activeTrxId));
+            if (!transaction) return showToast("Transaksi tidak ditemukan.");
+            if (String(transaction.status || "").toUpperCase() === "DIBATALKAN") return showToast("Transaksi ini sudah dibatalkan.");
+            if (String(transaction.status || "").toUpperCase() === "MENYIMPAN") return showToast("Transaksi masih disinkronkan; tunggu konfirmasi.", 7000);
+            const reason = prompt("Tuliskan alasan pembatalan transaksi " + transaction.id + ":");
+            if (reason === null) return;
+            if (!String(reason).trim()) return alert("Alasan pembatalan wajib diisi untuk jejak audit.");
+            if (!confirm("Batalkan transaksi Rp " + Number(transaction.total || 0).toLocaleString("id-ID") + "? Stok akan dikembalikan dan alasan dicatat.")) return;
+
+            const actor = document.getElementById("current-staff-display")?.textContent?.trim() || "Petugas tidak diketahui";
             document.getElementById('loader').classList.remove('hidden');
             google.script.run
-                .withSuccessHandler(() => {
-                    loadInitialData(); // Reload all to refresh stock and list
+                .withSuccessHandler(result => {
+                    const status = String(result && result.status || "DIBATALKAN").toUpperCase();
+                    if (status === "ALREADY_VOIDED") {
+                        transaction.status = "DIBATALKAN";
+                        transaction.cancellationReason = result.cancellationReason || transaction.cancellationReason || "";
+                    } else {
+                        transaction.status = "DIBATALKAN";
+                        transaction.cancellationReason = String(reason).trim();
+                        (transaction.items || []).forEach(item => {
+                            const product = getUniqueProductByBarcode_(item.barcode, false);
+                            if (product) product.stok = Number(product.stok || 0) + (Number(item.qty) || 0);
+                        });
+                    }
+                    filterSales();
+                    filterProfit();
+                    renderStock();
                     closeEditTrxModal();
                     document.getElementById('loader').classList.add('hidden');
-                    showToast("Transaksi telah dihapus");
+                    showToast("Transaksi dibatalkan. Riwayat dan alasan tersimpan di audit.", 7000);
                 })
-                .deleteTransactionFromSheet(activeTrxId);
+                .withFailureHandler(error => {
+                    document.getElementById('loader').classList.add('hidden');
+                    showToast("Pembatalan belum terkonfirmasi: " + (error && error.message ? error.message : error), 8000);
+                })
+                .deleteTransactionFromSheet(activeTrxId, String(reason).trim(), actor);
         }
 
-        // --- EXPORTS ---
+        
+
+// --- EXPORTS ---
         function downloadStokPDF() {
             const { jsPDF } = window.jspdf;
             const doc = new jsPDF();
@@ -2597,9 +2691,9 @@ function roundKoperasi(amount) {
     }
 }
 
-function playSuccessVoice() {
-    // 1. Ambil total nominal dari tampilan Grand Total untuk disebutkan
-    const totalText = document.getElementById('grand-total').textContent;
+function playSuccessVoice(amount) {
+    // Gunakan total transaksi yang tersimpan agar tetap benar setelah keranjang dikosongkan.
+    const totalText = Number.isFinite(Number(amount)) ? ("Rp " + Number(amount).toLocaleString("id-ID")) : document.getElementById('grand-total').textContent;
     
     const msg = new SpeechSynthesisUtterance();
     
@@ -2627,77 +2721,190 @@ function playSuccessVoice() {
     window.speechSynthesis.speak(msg);
 }
 
-function finalizeTransaction(method) {
-    const totalElement = document.getElementById('grand-total');
-    if (!totalElement) return;
-    
-    // Ambil nilai angka saja
-    const bill = parseInt(totalElement.textContent.replace(/\D/g, '')) || 0;
-    
-    // 1. Validasi Transaksi Ganda
-    const lastSavedTotal = parseInt(localStorage.getItem('last_trx_total')) || 0;
-    if (bill > 0 && bill === lastSavedTotal) {
-        const confirmDouble = confirm("⚠️ PERINGATAN TRANSAKSI GANDA!\n\nTotal belanja ini (Rp " + bill.toLocaleString() + ") sama dengan transaksi sebelumnya.\n\nApakah Anda yakin ingin menyimpannya lagi?");
-        if (!confirmDouble) return; 
-    }
+function setPaymentSyncStatus(message, state, showRetry) {
+    const box = document.getElementById("payment-sync-status");
+    const text = document.getElementById("payment-sync-message");
+    const retry = document.getElementById("payment-sync-retry");
+    if (!box || !text || !retry) return;
+    box.classList.remove("hidden", "border-amber-300", "bg-amber-50", "text-amber-900", "border-green-300", "bg-green-50", "text-green-900", "border-red-300", "bg-red-50", "text-red-900");
+    text.textContent = message;
+    if (state === "success") box.classList.add("border-green-300", "bg-green-50", "text-green-900");
+    else if (state === "error") box.classList.add("border-red-300", "bg-red-50", "text-red-900");
+    else box.classList.add("border-amber-300", "bg-amber-50", "text-amber-900");
+    retry.classList.toggle("hidden", !showRetry);
+}
 
-    const payInput = document.getElementById('pay-input');
-    const pay = parseInt(payInput.value) || 0;
-    
-    // 2. Validasi Uang Kurang
-    if (bill <= 0) return showToast("⚠️ Keranjang kosong!");
-    if (method === 'CASH' && pay < bill) {
-        showToast("⚠️ Uang tidak cukup!");
+function setCheckoutLocked(locked) {
+    const controls = document.querySelectorAll("#tab-kasir button, #tab-kasir input, #pay-modal button, #qris-special-modal button");
+    controls.forEach(el => {
+        if (el.id === "payment-sync-retry") return;
+        if (locked) {
+            if (el.dataset.checkoutWasDisabled === undefined) el.dataset.checkoutWasDisabled = el.disabled ? "true" : "false";
+            el.disabled = true;
+        } else if (el.dataset.checkoutWasDisabled !== undefined) {
+            el.disabled = el.dataset.checkoutWasDisabled === "true";
+            delete el.dataset.checkoutWasDisabled;
+        }
+    });
+    if (!locked && !navigator.onLine) {
+        const payButton = document.querySelector('button[onclick="showPayModal()"]');
+        const qrisButton = document.querySelector('button[onclick="bukaModalQRIS()"]');
+        if (payButton) payButton.disabled = true;
+        if (qrisButton) qrisButton.disabled = true;
+    }
+}
+
+function callServerAsync_(method, ...args) {
+    return new Promise((resolve, reject) => {
+        const runner = google.script.run
+            .withSuccessHandler(resolve)
+            .withFailureHandler(error => reject(new Error(error && error.message ? error.message : String(error))));
+        runner[method](...args);
+    });
+}
+
+function getCheckoutWarnings_() {
+    const warnings = [];
+    const qtyByBarcode = {};
+    cart.forEach(item => { qtyByBarcode[item.barcode] = (qtyByBarcode[item.barcode] || 0) + (Number(item.qty) || 0); });
+    cart.forEach(item => {
+        const product = getUniqueProductByBarcode_(item.barcode, false) || item;
+        const barcode = String(item.barcode || "");
+        const qty = Number(qtyByBarcode[barcode]) || 0;
+        const stock = Number(product.stok);
+        const modal = Number(product.modal);
+        const jual = Number(product.jual);
+        if (!Number.isFinite(stock) || stock < qty) warnings.push("• " + item.nama + ": stok " + (Number.isFinite(stock) ? stock : "tidak diketahui") + ", akan menjadi minus.");
+        if (!Number.isFinite(jual) || jual <= 0) warnings.push("• " + item.nama + ": harga jual tidak valid.");
+        else if (Number.isFinite(modal) && modal > 0 && jual < modal) warnings.push("• " + item.nama + ": harga jual lebih rendah dari harga modal.");
+        else if (Number.isFinite(modal) && modal > 0 && jual > modal * 10) warnings.push("• " + item.nama + ": harga jual lebih dari 10 kali harga modal.");
+    });
+    return [...new Set(warnings)];
+}
+
+function refreshProductsAfterSync_(items) {
+    const barcodes = [...new Set((items || []).map(item => String(item.barcode || "").trim()).filter(Boolean))];
+    if (!barcodes.length) return;
+    Promise.all(barcodes.map(barcode => callServerAsync_("getProductByBarcode", barcode).catch(() => null)))
+        .then(savedProducts => {
+            savedProducts.filter(Boolean).forEach(saved => {
+                const index = products.findIndex(item => String(item.barcode || "").trim() === String(saved.barcode || "").trim());
+                if (index >= 0) products[index] = saved;
+                else products.push(saved);
+            });
+            renderStock();
+        });
+}
+
+
+function completeSavedTransaction_(options = {}) {
+    if (!pendingRecovery) return;
+    const savedTrans = JSON.parse(JSON.stringify(pendingRecovery));
+    savedTrans.status = "";
+    savedTrans.cancellationReason = "";
+    const wasQris = String(savedTrans.method).toUpperCase() === "QRIS";
+
+    const qtyByBarcode = {};
+    savedTrans.items.forEach(item => { qtyByBarcode[item.barcode] = (qtyByBarcode[item.barcode] || 0) + (Number(item.qty) || 0); });
+    if (!pendingRecoveryWasRestored) Object.keys(qtyByBarcode).forEach(barcode => {
+        const product = getUniqueProductByBarcode_(barcode, false);
+        if (product) product.stok = Number(product.stok || 0) - qtyByBarcode[barcode];
+    });
+    refreshProductsAfterSync_(savedTrans.items);
+    pendingRecoveryWasRestored = false;
+    const existingIndex = transactions.findIndex(item => String(item.id) === String(savedTrans.id));
+    if (existingIndex >= 0) transactions[existingIndex] = savedTrans;
+    else transactions.push(savedTrans);
+
+    localStorage.removeItem(INFLIGHT_TRANSACTION_KEY);
+    localStorage.removeItem("koperasi_cart_backup");
+    pendingRecovery = null;
+    paymentSaveInProgress = false;
+    cart = [];
+    renderCart();
+    localStorage.removeItem("koperasi_cart_backup");
+    closePayModal();
+    if (wasQris) {
+        tutupModalQRIS();
+        speakQRISSuccess(savedTrans.total);
+    } else {
+        playSuccessVoice(savedTrans.total);
+    }
+    renderStock();
+    filterSales();
+    filterProfit();
+    setCheckoutLocked(false);
+    setPaymentSyncStatus("✅ Transaksi " + savedTrans.id + " sudah tersimpan dan keranjang telah dikosongkan.", "success", false);
+    if (paymentStatusTimer) clearTimeout(paymentStatusTimer);
+    paymentStatusTimer = setTimeout(() => {
+        if (!pendingRecovery) document.getElementById("payment-sync-status").classList.add("hidden");
+    }, 7000);
+    if (options.printReceipt) printThermal(savedTrans);
+    showToast("✅ Transaksi Berhasil tersimpan.", 7000);
+}
+
+async function retryPendingTransaction(options = {}) {
+    if (!pendingRecovery || paymentSaveInProgress) return;
+    if (!navigator.onLine) {
+        setCheckoutLocked(true);
+        setPaymentSyncStatus("Koneksi internet terputus. Transaksi dan keranjang tersimpan di perangkat; sinkronisasi akan memakai ID yang sama saat koneksi pulih.", "error", true);
         return;
     }
+    paymentSaveInProgress = true;
+    setCheckoutLocked(true);
+    const transactionId = pendingRecovery.id;
+    setPaymentSyncStatus("Memastikan status transaksi " + transactionId + " di database. Keranjang dikunci agar tidak tercatat dua kali.", "pending", false);
+    if (paymentStatusTimer) clearTimeout(paymentStatusTimer);
+    paymentStatusTimer = setTimeout(() => {
+        if (pendingRecovery && paymentSaveInProgress) setPaymentSyncStatus("Server masih memproses transaksi. Jangan refresh atau tekan Bayar lagi; sistem akan memakai ID transaksi yang sama.", "pending", false);
+    }, 5000);
+    try {
+        await callServerAsync_("recordTransaction", pendingRecovery);
+        if (paymentStatusTimer) clearTimeout(paymentStatusTimer);
+        completeSavedTransaction_({ printReceipt: Boolean(options.printReceipt) });
+    } catch (error) {
+        if (paymentStatusTimer) clearTimeout(paymentStatusTimer);
+        paymentSaveInProgress = false;
+        setCheckoutLocked(true);
+        setPaymentSyncStatus((error && error.message ? error.message : String(error)) + " ID " + transactionId + " tetap tersimpan di perangkat. Gunakan tombol di bawah untuk pemeriksaan ulang.", "error", true);
+        showToast("Status transaksi belum pasti. Jangan membuat transaksi baru.", 8000);
+    }
+}
 
-    document.getElementById('loader').classList.remove('hidden');
+function finalizeTransaction(method) {
+    if (paymentSaveInProgress) return showToast("Transaksi sedang disinkronkan. Tunggu konfirmasi statusnya.", 7000);
+    if (pendingRecovery) return retryPendingTransaction();
+    const totalElement = document.getElementById("grand-total");
+    if (!totalElement) return;
+    const bill = parseInt(totalElement.textContent.replace(/\D/g, "")) || 0;
+    const payInput = document.getElementById("pay-input");
+    const pay = parseInt(payInput && payInput.value) || 0;
+    if (bill <= 0) return showToast("⚠️ Keranjang kosong!");
+    if (method === "CASH" && pay < bill) return showToast("⚠️ Uang tidak cukup!");
+    if (!navigator.onLine) return showToast("Koneksi offline. Transaksi belum dikirim; keranjang tetap tersimpan.", 8000);
 
-    const newTrans = {
-        id: "TRX-" + Date.now(),
+    const warnings = getCheckoutWarnings_();
+    if (warnings.length && !confirm("Periksa peringatan berikut sebelum pembayaran:\n\n" + warnings.join("\n") + "\n\nLanjutkan transaksi?")) return;
+
+    const transactionId = "TRX-" + Date.now() + "-" + Math.random().toString(36).slice(2, 9).toUpperCase();
+    pendingRecovery = {
+        id: transactionId,
         items: JSON.parse(JSON.stringify(cart)),
         total: bill,
-        pay: method === 'QRIS' ? bill : pay,
-        change: method === 'QRIS' ? 0 : pay - bill,
-        date: new Date().toLocaleString('sv-SE', { timeZone: APP_TIMEZONE }).replace(' ', 'T') + '+08:00',
-        method: method
+        pay: String(method).toUpperCase() === "QRIS" ? bill : pay,
+        change: String(method).toUpperCase() === "QRIS" ? 0 : pay - bill,
+        date: new Date().toLocaleString("sv-SE", { timeZone: APP_TIMEZONE }).replace(" ", "T") + "+08:00",
+        method: String(method).toUpperCase()
     };
-
-    google.script.run
-        .withSuccessHandler(() => {
-            // AKTIFKAN SUARA SUKSES DI SINI
-            playSuccessVoice();
-            
-            // Simpan riwayat untuk cek ganda di transaksi berikutnya
-            localStorage.setItem('last_trx_total', bill); 
-
-            // Update stok lokal
-            cart.forEach(c => {
-                const p = products.find(prod => prod.barcode === c.barcode);
-                if (p) p.stok -= c.qty;
-            });
-
-            transactions.push(newTrans);
-            printThermal(newTrans); // Cetak struk
-            
-            // Reset state kasir
-            cart = [];
-            localStorage.removeItem('koperasi_cart_backup');
-            renderCart();
-            closePayModal();
-            renderStock();
-            filterSales();
-            filterProfit();
-            
-            document.getElementById('loader').classList.add('hidden');
-            showToast("✅ Transaksi Berhasil!");
-        })
-        .withFailureHandler((err) => {
-            document.getElementById('loader').classList.add('hidden');
-            alert("Gagal menyimpan: " + err);
-        })
-        .recordTransaction(newTrans);
+    localStorage.setItem(INFLIGHT_TRANSACTION_KEY, JSON.stringify(pendingRecovery));
+    localStorage.setItem("koperasi_cart_backup", JSON.stringify(cart));
+    if (String(method).toUpperCase() === "QRIS") tutupModalQRIS();
+    else closePayModal();
+    retryPendingTransaction({ printReceipt: true });
 }
+
+
+
 function holdTransaction() {
     if (cart.length === 0) return showToast("Keranjang masih kosong!");
 
@@ -2772,11 +2979,21 @@ function removePending(index) {
 
 // Cek status secara real-time
 window.addEventListener('online', updateNetworkStatus);
+window.addEventListener('online', () => {
+    if (pendingRecovery && !paymentSaveInProgress) retryPendingTransaction();
+});
 window.addEventListener('offline', updateNetworkStatus);
 
 function updateNetworkStatus() {
     const btnBayar = document.querySelector('button[onclick="showPayModal()"]');
     const offlineBanner = document.getElementById('offline-banner');
+    if (pendingRecovery) {
+        if (btnBayar) { btnBayar.disabled = true; btnBayar.textContent = "SINKRONISASI PENDING"; }
+        const qrisButton = document.querySelector('button[onclick="bukaModalQRIS()"]');
+        if (qrisButton) qrisButton.disabled = true;
+        if (offlineBanner) offlineBanner.classList.toggle('hidden', navigator.onLine);
+        return;
+    }
     
     if (navigator.onLine) {
         // --- MODE ONLINE ---
@@ -3016,18 +3233,17 @@ function prosesTampilQRIS() {
 }
 
 function selesaiBayarQRIS() {
-    const nominal = document.getElementById('qris-nominal-input').value;
-    
-    // Jalankan proses finalisasi transaksi ke sistem
-    // Kita panggil fungsi finalizeTransaction yang sudah ada dengan metode 'QRIS'
-    document.getElementById('pay-input').value = nominal; // Set input bayar agar valid
-    finalizeTransaction('QRIS'); 
-    
-    tutupModalQRIS();
-    
-    // Fungsi Suara AI
-    speakQRISSuccess(nominal);
+    const nominal = Number(document.getElementById('qris-nominal-input').value) || 0;
+    const bill = parseInt(document.getElementById('grand-total').textContent.replace(/\D/g, "")) || 0;
+    if (nominal <= 0 || nominal !== bill) {
+        showToast("Nominal QRIS harus sama dengan total transaksi.", 7000);
+        return;
+    }
+    document.getElementById('pay-input').value = nominal;
+    finalizeTransaction('QRIS');
 }
+
+
 
 function speakQRISSuccess(nominal) {
     const msg = new SpeechSynthesisUtterance();
@@ -3368,7 +3584,7 @@ function getShiftTransactions(dateKey, shiftNum) {
 
     return (Array.isArray(transactions) ? transactions : [])
         .map(t => ({ t, d: parseTransactionDateForReport(t.date) }))
-        .filter(x => x.d && x.d >= range.start && x.d < range.end)
+        .filter(x => x.d && x.d >= range.start && x.d < range.end && !["DIBATALKAN", "MENYIMPAN"].includes(String(x.t.status || "").toUpperCase()))
         .sort((a, b) => a.d - b.d)
         .map(x => x.t);
 }

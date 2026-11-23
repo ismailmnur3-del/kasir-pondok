@@ -1278,16 +1278,120 @@ thead th { background: #1e4c39; }
     <script>
         const KOPERASI_API_URL = "https://script.google.com/macros/s/AKfycby0mnhP9DkkvSnHOJg1HcHNOlgEExlYKR7-HT2y5umeyI12suiTKQMRH6P-6XB65_Ar/exec";
 
+        function callKoperasiJsonp_(action, args = []) {
+            return new Promise((resolve, reject) => {
+                const callbackName = "__koperasi_jsonp_" + Date.now() + "_" + Math.floor(Math.random() * 1000000000);
+                const script = document.createElement("script");
+                const cleanup = () => {
+                    clearTimeout(timer);
+                    delete window[callbackName];
+                    if (script.parentNode) script.parentNode.removeChild(script);
+                };
+                const timer = setTimeout(() => {
+                    cleanup();
+                    reject(new Error("Waktu tunggu pembacaan database habis."));
+                }, 15000);
+
+                window[callbackName] = response => {
+                    cleanup();
+                    if (!response || !response.success) {
+                        reject(new Error(response && response.error ? response.error : "Pembacaan database gagal."));
+                    } else {
+                        resolve(response.data);
+                    }
+                };
+
+                let url = KOPERASI_API_URL + "?action=" + encodeURIComponent(action) + "&callback=" + encodeURIComponent(callbackName);
+                if (action === "getDailyKasRecord") url += "&date=" + encodeURIComponent(args[0] || "");
+                script.onerror = () => {
+                    cleanup();
+                    reject(new Error("Gagal membaca database Apps Script."));
+                };
+                script.src = url;
+                document.head.appendChild(script);
+            });
+        }
+
+        function delayKoperasiApi_(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
         async function callKoperasiApi_(method, args = []) {
-            const response = await fetch(KOPERASI_API_URL, {
+            const readActions = ["getInitialData", "getBroadcastMessage", "getDailyKasRecord"];
+            if (readActions.includes(method)) return callKoperasiJsonp_(method, args);
+
+            const writeActions = [
+                "saveProductToSheet", "deleteProductFromSheet", "recordTransaction",
+                "updateTransactionMethodInSheet", "deleteTransactionFromSheet",
+                "insertDailyOmzetToKas", "saveBroadcastMessage"
+            ];
+            if (!writeActions.includes(method)) throw new Error("Aksi API tidak diizinkan.");
+
+            let targetBarcode = "";
+            if (method === "deleteProductFromSheet") {
+                const before = await callKoperasiJsonp_("getInitialData");
+                const target = (before.products || []).find(item => String(item.id) === String(args[0]));
+                if (!target) throw new Error("Barang tidak ditemukan sebelum dihapus.");
+                targetBarcode = String(target.barcode || "");
+            }
+
+            const beforeKasRecord = method === "insertDailyOmzetToKas"
+                ? await callKoperasiJsonp_("getDailyKasRecord", [args[0]])
+                : null;
+
+            // Apps Script ContentService blocks readable CORS responses. Send a simple
+            // POST, then confirm the change using the read-only JSONP routes above.
+            await fetch(KOPERASI_API_URL, {
+                mode: "no-cors",
                 method: "POST",
                 headers: { "Content-Type": "text/plain;charset=utf-8" },
                 body: JSON.stringify({ action: method, args })
             });
-            if (!response.ok) throw new Error("HTTP " + response.status);
-            const result = await response.json();
-            if (!result || !result.success) throw new Error(result && result.error ? result.error : "API gagal.");
-            return result.data;
+
+            for (let attempt = 0; attempt < 8; attempt++) {
+                await delayKoperasiApi_(250 + attempt * 250);
+
+                if (method === "insertDailyOmzetToKas") {
+                    const record = await callKoperasiJsonp_("getDailyKasRecord", [args[0]]);
+                    if (record) {
+                        return {
+                            alreadyRecorded: Boolean(beforeKasRecord),
+                            amount: Number(record.amount) || 0,
+                            saldo: Number(record.saldo) || 0,
+                            date: record.date
+                        };
+                    }
+                    continue;
+                }
+
+                if (method === "saveBroadcastMessage") {
+                    const savedMessage = await callKoperasiJsonp_("getBroadcastMessage");
+                    if (String(savedMessage || "") === String(args[0] || "")) return "Pesan diperbarui!";
+                    continue;
+                }
+
+                const state = await callKoperasiJsonp_("getInitialData");
+                const productsState = Array.isArray(state.products) ? state.products : [];
+                const transactionsState = Array.isArray(state.transactions) ? state.transactions : [];
+
+                if (method === "saveProductToSheet") {
+                    const product = args[0] || {};
+                    const saved = productsState.find(item => String(item.barcode).trim() === String(product.barcode || "").trim());
+                    if (saved && saved.nama === String(product.nama || "").trim()) return "Barang tersimpan.";
+                } else if (method === "deleteProductFromSheet") {
+                    if (!productsState.some(item => String(item.barcode || "") === targetBarcode)) return true;
+                } else if (method === "recordTransaction") {
+                    const trans = args[0] || {};
+                    if (transactionsState.some(item => String(item.id) === String(trans.id || ""))) return "Transaction Recorded";
+                } else if (method === "updateTransactionMethodInSheet") {
+                    const saved = transactionsState.find(item => String(item.id) === String(args[0] || ""));
+                    if (saved && String(saved.method).toUpperCase() === String(args[1] || "").toUpperCase()) return true;
+                } else if (method === "deleteTransactionFromSheet") {
+                    if (!transactionsState.some(item => String(item.id) === String(args[0] || ""))) return true;
+                }
+            }
+
+            throw new Error("Permintaan dikirim, tetapi hasilnya belum terverifikasi di spreadsheet.");
         }
 
         function createAppsScriptRun_(successHandler, failureHandler) {

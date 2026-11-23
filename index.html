@@ -2523,7 +2523,7 @@ function closeProductModal() {
 
         // --- THERMAL PRINTING ---
         function printThermal(t) {
-    let win = window.open('', 'PRINT', 'height=600,width=400');
+    let win = window.open('', 'PRINT', 'height=600,width=400'); if (!win || win.closed) { showToast("Jendela cetak tidak terbuka. Izinkan pop-up browser untuk mencetak struk.", 7000); return false; }
     
     win.document.write(`
         <html>
@@ -2839,12 +2839,12 @@ function completeSavedTransaction_(options = {}) {
     paymentStatusTimer = setTimeout(() => {
         if (!pendingRecovery) document.getElementById("payment-sync-status").classList.add("hidden");
     }, 7000);
-    if (options.printReceipt) printThermal(savedTrans);
+    if (options.printReceipt) { try { printThermal(savedTrans); } catch (printError) { console.warn("Transaksi tersimpan, tetapi cetak struk gagal:", printError); showToast("Transaksi tersimpan; struk gagal dicetak.", 8000); } }
     showToast("✅ Transaksi Berhasil tersimpan.", 7000);
 }
 
 async function retryPendingTransaction(options = {}) {
-    if (!pendingRecovery || paymentSaveInProgress) return;
+    if (paymentSaveInProgress) return;    if (!pendingRecovery) {        const rawPending = localStorage.getItem(INFLIGHT_TRANSACTION_KEY);        if (rawPending) {            try {                const restored = JSON.parse(rawPending);                if (restored && restored.id && Array.isArray(restored.items) && restored.items.length) {                    pendingRecovery = restored;                    pendingRecoveryWasRestored = true;                }            } catch (_) {}        }    }    if (!pendingRecovery) {        setCheckoutLocked(false);        setPaymentSyncStatus("Tidak ada transaksi tertunda di perangkat ini. Periksa laporan berdasarkan ID sebelumnya sebelum mencoba pembayaran lagi.", "error", false);        return;    }
     if (!navigator.onLine) {
         setCheckoutLocked(true);
         setPaymentSyncStatus("Koneksi internet terputus. Transaksi dan keranjang tersimpan di perangkat; sinkronisasi akan memakai ID yang sama saat koneksi pulih.", "error", true);

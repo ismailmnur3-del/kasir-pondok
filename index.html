@@ -2104,7 +2104,7 @@ function closeProductModal() {
                                 onclick="event.stopPropagation(); showSaleDetail('${escapeHtmlAttr(t.id)}')"
                                 class="text-blue-600 font-bold hover:underline"
                             >
-                                ${itemCount} ITEM • DETAIL</button><button onclick="event.stopPropagation(); printTransactionById('${escapeHtmlAttr(t.id)}')" class="ml-2 text-emerald-700 font-bold hover:underline whitespace-nowrap">🖨️ CETAK STRUK
+                                ${itemCount} ITEM • DETAIL</button><button onclick="event.stopPropagation(); printTransactionById('${escapeHtmlAttr(t.id)}')" class="ml-2 ${isVoided || isPending ? 'text-slate-400 cursor-not-allowed' : 'text-emerald-700 hover:underline'} font-bold whitespace-nowrap" ${isVoided || isPending ? 'disabled title="Struk tidak tersedia untuk transaksi ini"' : ''}>🖨️ CETAK STRUK
                             </button>
                         </td>
                     </tr>

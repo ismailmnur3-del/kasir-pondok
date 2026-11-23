@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "koperasi-kasir-";
-const CACHE_NAME = CACHE_PREFIX + "v1";
+const CACHE_NAME = CACHE_PREFIX + "v2";
 const APP_ROOT = new URL("./", self.registration.scope).href;
 const APP_SHELL = [APP_ROOT, new URL("index.html", APP_ROOT).href];
 const STATIC_REMOTE_ASSETS = [

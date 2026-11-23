@@ -2104,7 +2104,7 @@ function closeProductModal() {
                                 onclick="event.stopPropagation(); showSaleDetail('${escapeHtmlAttr(t.id)}')"
                                 class="text-blue-600 font-bold hover:underline"
                             >
-                                ${itemCount} ITEM • DETAIL
+                                ${itemCount} ITEM • DETAIL</button><button onclick="event.stopPropagation(); printTransactionById('${escapeHtmlAttr(t.id)}')" class="ml-2 text-emerald-700 font-bold hover:underline whitespace-nowrap">🖨️ CETAK STRUK
                             </button>
                         </td>
                     </tr>
@@ -2115,7 +2115,7 @@ function closeProductModal() {
                 `Rp ${totalSales.toLocaleString()}`;
         }
 
-        function insertOmzetToKas() {
+        function printTransactionById(trxId) { const t = transactions.find(item => String(item.id) === String(trxId)); if (!t) return showToast("Transaksi tidak ditemukan.", 7000); const status = String(t.status || "").toUpperCase(); if (status === "DIBATALKAN") return showToast("Struk transaksi yang dibatalkan tidak dapat dicetak.", 7000); if (status === "MENYIMPAN") return showToast("Transaksi masih menunggu sinkronisasi; struk belum tersedia.", 7000); if (!Array.isArray(t.items) || !t.items.length) return showToast("Detail barang transaksi tidak tersedia untuk dicetak.", 7000); return printThermal(t); } function insertOmzetToKas() {
             const date = document.getElementById('report-date-sales').value;
             const totalText = document.getElementById('total-sales-display').textContent;
             const totalOmzet = Number(totalText.replace(/[^0-9]/g, '')) || 0;
@@ -2522,10 +2522,10 @@ function closeProductModal() {
         }
 
         // --- THERMAL PRINTING ---
-        function printThermal(t) {
-    let win = window.open('', 'PRINT', 'height=600,width=400'); if (!win || win.closed) { showToast("Jendela cetak tidak terbuka. Izinkan pop-up browser untuk mencetak struk.", 7000); return false; }
+        function printThermal(t, targetWindow = null) {
+    let win = targetWindow === false ? null : (targetWindow ? (!targetWindow.closed ? targetWindow : null) : window.open('', 'PRINT', 'height=600,width=400')); if (!win || win.closed) { setTimeout(() => showToast("Transaksi tersimpan, tetapi jendela struk diblokir. Cetak ulang melalui Laporan Penjualan.", 7000), 0); return false; }
     
-    win.document.write(`
+    win.document.open(); win.document.write(`
         <html>
         <style>
             @page { margin: 0; } 
@@ -2839,7 +2839,7 @@ function completeSavedTransaction_(options = {}) {
     paymentStatusTimer = setTimeout(() => {
         if (!pendingRecovery) document.getElementById("payment-sync-status").classList.add("hidden");
     }, 7000);
-    if (options.printReceipt) { try { printThermal(savedTrans); } catch (printError) { console.warn("Transaksi tersimpan, tetapi cetak struk gagal:", printError); showToast("Transaksi tersimpan; struk gagal dicetak.", 8000); } }
+    if (options.printReceipt) { try { printThermal(savedTrans, options.printWindow); } catch (printError) { console.warn("Transaksi tersimpan, tetapi cetak struk gagal:", printError); setTimeout(() => showToast("Transaksi tersimpan; struk gagal dicetak. Cetak ulang melalui Laporan Penjualan.", 8000), 0); } }
     showToast("✅ Transaksi Berhasil tersimpan.", 7000);
 }
 
@@ -2847,7 +2847,7 @@ async function retryPendingTransaction(options = {}) {
     if (paymentSaveInProgress) return;    if (!pendingRecovery) {        const rawPending = localStorage.getItem(INFLIGHT_TRANSACTION_KEY);        if (rawPending) {            try {                const restored = JSON.parse(rawPending);                if (restored && restored.id && Array.isArray(restored.items) && restored.items.length) {                    pendingRecovery = restored;                    pendingRecoveryWasRestored = true;                }            } catch (_) {}        }    }    if (!pendingRecovery) {        setCheckoutLocked(false);        setPaymentSyncStatus("Tidak ada transaksi tertunda di perangkat ini. Periksa laporan berdasarkan ID sebelumnya sebelum mencoba pembayaran lagi.", "error", false);        return;    }
     if (!navigator.onLine) {
         setCheckoutLocked(true);
-        setPaymentSyncStatus("Koneksi internet terputus. Transaksi dan keranjang tersimpan di perangkat; sinkronisasi akan memakai ID yang sama saat koneksi pulih.", "error", true);
+        setPaymentSyncStatus("Koneksi internet terputus. Transaksi dan keranjang tersimpan di perangkat; sinkronisasi akan memakai ID yang sama saat koneksi pulih.", "error", true); if (options.printWindow && options.printWindow !== false && !options.printWindow.closed) options.printWindow.close();
         return;
     }
     paymentSaveInProgress = true;
@@ -2861,12 +2861,12 @@ async function retryPendingTransaction(options = {}) {
     try {
         await callServerAsync_("recordTransaction", pendingRecovery);
         if (paymentStatusTimer) clearTimeout(paymentStatusTimer);
-        completeSavedTransaction_({ printReceipt: Boolean(options.printReceipt) });
+        completeSavedTransaction_({ printReceipt: Boolean(options.printReceipt), printWindow: options.printWindow });
     } catch (error) {
         if (paymentStatusTimer) clearTimeout(paymentStatusTimer);
         paymentSaveInProgress = false;
         setCheckoutLocked(true);
-        setPaymentSyncStatus((error && error.message ? error.message : String(error)) + " ID " + transactionId + " tetap tersimpan di perangkat. Gunakan tombol di bawah untuk pemeriksaan ulang.", "error", true);
+        if (options.printWindow && options.printWindow !== false && !options.printWindow.closed) options.printWindow.close(); setPaymentSyncStatus((error && error.message ? error.message : String(error)) + " ID " + transactionId + " tetap tersimpan di perangkat. Gunakan tombol di bawah untuk pemeriksaan ulang.", "error", true);
         showToast("Status transaksi belum pasti. Jangan membuat transaksi baru.", 8000);
     }
 }
@@ -2886,7 +2886,7 @@ function finalizeTransaction(method) {
     const warnings = getCheckoutWarnings_();
     if (warnings.length && !confirm("Periksa peringatan berikut sebelum pembayaran:\n\n" + warnings.join("\n") + "\n\nLanjutkan transaksi?")) return;
 
-    const transactionId = "TRX-" + Date.now() + "-" + Math.random().toString(36).slice(2, 9).toUpperCase();
+    const receiptWindow = window.open("", "PRINT", "height=600,width=400"); if (receiptWindow && !receiptWindow.closed) { receiptWindow.document.write('<!doctype html><html><head><title>Menyiapkan struk</title></head><body style="font:16px Arial;padding:24px">Pembayaran sedang disimpan. Struk akan tampil setelah transaksi berhasil.</body></html>'); receiptWindow.document.close(); } const transactionId = "TRX-" + Date.now() + "-" + Math.random().toString(36).slice(2, 9).toUpperCase();
     pendingRecovery = {
         id: transactionId,
         items: JSON.parse(JSON.stringify(cart)),
@@ -2900,7 +2900,7 @@ function finalizeTransaction(method) {
     localStorage.setItem("koperasi_cart_backup", JSON.stringify(cart));
     if (String(method).toUpperCase() === "QRIS") tutupModalQRIS();
     else closePayModal();
-    retryPendingTransaction({ printReceipt: true });
+    retryPendingTransaction({ printReceipt: true, printWindow: receiptWindow || false });
 }
 
 
